@@ -135,7 +135,11 @@
       y descarga todo en un ZIP.</p>
     <div class="btns">
       <button class="b-primary" id="btnGenerar" onclick="generarLoteFinal()" disabled>📄 Generar y descargar lote numerado</button>
+      <button class="b-ok" id="btnCombinado" onclick="descargarLoteCombinado()" disabled>📄 Descargar PDF combinado</button>
     </div>
+    <p class="hint">El ZIP incluye, por acta: el PDF final numerado y un Excel de control. También incluye un
+      PDF combinado de todo el lote (una acta por página) para revisión rápida. Con «PDF combinado» lo
+      descargas suelto sin armar el ZIP.</p>
   </div>
 
   <!-- ───────────── HISTORIAL ───────────── -->
@@ -159,6 +163,8 @@
 /* ═══════════════ Helpers ═══════════════ */
 function hoyISO(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function slug(t){ return String(t||'comedor').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'') || 'comedor'; }
+/* Nombre base ordenado para archivos: NN_Departamento_Comedor (facilita ordenar) */
+function baseNombre(item, i){ return String(i+1).padStart(2,'0')+'_'+slug(item.departamento)+'_'+slug(item.comedor); }
 function val(id){ const el=document.getElementById(id); return el? el.value.trim() : ''; }
 
 /* ═══════════════ localStorage ═══════════════ */
@@ -224,6 +230,7 @@ function renderPendientes(){
   const cont=document.getElementById('listaPendientes');
   document.getElementById('contadorPend').textContent=pendientes.length;
   document.getElementById('btnGenerar').disabled = pendientes.length===0;
+  document.getElementById('btnCombinado').disabled = pendientes.length===0;
   if(!pendientes.length){ cont.innerHTML='<div class="vacio">No hay actas pendientes. Carga un ZIP de un supervisor.</div>'; return; }
   cont.innerHTML='';
   pendientes.forEach((item,idx)=>{
@@ -233,6 +240,7 @@ function renderPendientes(){
       item.filas.length+' día(s) · '+item.tot_total+' raciones</span></div>'+
       '<div class="acciones">'+
       '<button class="b-ghost" onclick="verBorrador('+idx+')">👁️ Ver borrador</button>'+
+      '<button class="b-ok" onclick="descargarBorradorItem('+idx+')">⬇️ PDF</button>'+
       '<button class="b-danger" onclick="quitarPendiente('+idx+')">🗑️ Quitar</button>'+
       '</div>';
     cont.appendChild(div);
@@ -254,6 +262,13 @@ function vaciarPendientes(){
 async function verBorrador(idx){
   const item=Object.assign({}, pendientes[idx], {no_acta:'SN', fecha_emision:null});
   await mostrarPreview(item);
+}
+async function descargarBorradorItem(idx){
+  const item=Object.assign({}, pendientes[idx], {no_acta:'SN', fecha_emision:null});
+  try{
+    const {doc}=await MotorConsolidada.autoAjustar(pdfMake, item);
+    pdfMake.createPdf(doc).download(baseNombre(pendientes[idx], idx)+'_borrador.pdf');
+  }catch(e){ alert('No se pudo generar el PDF: '+e); }
 }
 
 /* ═══════════════ Configuración / correlativo ═══════════════ */
@@ -320,6 +335,19 @@ async function verFinalPreview(idx){
   const data=Object.assign({}, a.item, {no_acta:a.no_acta, hora_acta:a.hora_acta, fecha_emision:a.fecha_emision});
   await mostrarPreview(data);
 }
+async function descargarLoteCombinado(){
+  if(!pendientes.length) return;
+  const r=calcularAsignaciones();
+  if(r.error){ alert('⚠️ '+r.error); return; }
+  const btn=document.getElementById('btnCombinado');
+  btn.disabled=true; btn.textContent='⏳ Generando PDF…';
+  try{
+    const datos=r.asignaciones.map(a=>Object.assign({}, a.item, {no_acta:a.no_acta, hora_acta:a.hora_acta, fecha_emision:a.fecha_emision}));
+    const {doc}=await MotorConsolidada.combinar(pdfMake, datos);
+    pdfMake.createPdf(doc).download('Lote_numerado_'+r.actaIni+'_a_'+(r.actaIni+pendientes.length-1)+'_'+r.fecha+'.pdf');
+  }catch(e){ alert('❌ No se pudo generar el PDF combinado: '+e); }
+  finally{ btn.disabled=pendientes.length===0; btn.textContent='📄 Descargar PDF combinado'; }
+}
 
 async function mostrarPreview(data){
   try{
@@ -357,7 +385,7 @@ async function generarLoteFinal(){
       const data=Object.assign({}, a.item, {no_acta:a.no_acta, hora_acta:a.hora_acta, fecha_emision:a.fecha_emision});
       const {doc}=await MotorConsolidada.autoAjustar(pdfMake, data);
       const pdfBytes=await new Promise(res=>pdfMake.createPdf(doc).getBuffer(b=>res(b)));
-      const nombre='ACTA_'+a.no_acta+'_'+slug(a.item.comedor)+'.pdf';
+      const nombre='ACTA_'+String(a.no_acta).padStart(2,'0')+'_'+slug(a.item.departamento)+'_'+slug(a.item.comedor)+'.pdf';
       zip.file(nombre, pdfBytes);
       control.push({
         'N° Acta': a.no_acta, 'Comedor': a.item.comedor, 'Modalidad': a.item.modalidad||'Fijo',
@@ -375,6 +403,12 @@ async function generarLoteFinal(){
     XLSX.utils.book_append_sheet(wb, ws, 'Control de Numeración');
     const wbBuf=XLSX.write(wb, {type:'array', bookType:'xlsx'});
     zip.file('Control_Numeracion_'+r.fecha+'.xlsx', wbBuf);
+
+    // PDF combinado (numerado) de todo el lote, en la raíz del ZIP
+    const datosCombinado=r.asignaciones.map(a=>Object.assign({}, a.item, {no_acta:a.no_acta, hora_acta:a.hora_acta, fecha_emision:a.fecha_emision}));
+    const {doc:docCombinado}=await MotorConsolidada.combinar(pdfMake, datosCombinado);
+    const combinadoBytes=await new Promise(res=>pdfMake.createPdf(docCombinado).getBuffer(b=>res(b)));
+    zip.file('Lote_numerado_'+r.actaIni+'_a_'+(r.actaIni+pendientes.length-1)+'_'+r.fecha+'.pdf', combinadoBytes);
 
     const blob=await zip.generateAsync({type:'blob'});
     const url=URL.createObjectURL(blob);
